@@ -223,13 +223,93 @@
         }
 
         let lastVideoTime = -1;
+        let lastFireworkTime = 0;
+
+        // 手势逻辑辅助函数
+        function getDistance(p1, p2) {
+            return Math.sqrt(Math.pow(p1.x - p2.x, 2) + Math.pow(p1.y - p2.y, 2));
+        }
+
+        function isFingerExtended(landmarks, fingerTipIdx, fingerPipIdx) {
+            return landmarks[fingerTipIdx].y < landmarks[fingerPipIdx].y;
+        }
+
         async function predictWebcam(video) {
             if (handLandmarker && webcamRunning) {
                 let startTimeMs = performance.now();
                 if (video.currentTime !== lastVideoTime) {
                     lastVideoTime = video.currentTime;
                     const results = handLandmarker.detectForVideo(video, startTimeMs);
-                    // 可以在这里添加手势控制逻辑
+                    
+                    if (results.landmarks && results.landmarks.length > 0) {
+                        const landmarks = results.landmarks[0]; // 获取第一只手
+                        
+                        // 1. 识别捏合 (Pinch) - 用于滚动
+                        const thumbTip = landmarks[4];
+                        const indexTip = landmarks[8];
+                        const pinchDist = getDistance(thumbTip, indexTip);
+                        const isPinching = pinchDist < 0.05;
+
+                        // 2. 识别胜利手势 (Victory) - 用于烟花
+                        // 简单判断：食指(8)中指(12)伸直，无名指(16)小指(20)弯曲
+                        const indexExtended = landmarks[8].y < landmarks[6].y;
+                        const middleExtended = landmarks[12].y < landmarks[10].y;
+                        const ringFolded = landmarks[16].y > landmarks[14].y;
+                        const pinkyFolded = landmarks[20].y > landmarks[18].y;
+                        
+                        const isVictory = indexExtended && middleExtended && ringFolded && pinkyFolded && !isPinching;
+
+                        // --- 逻辑处理 ---
+                        const statusDiv = document.getElementById('model-status');
+                        statusDiv.style.display = 'block';
+
+                        if (isPinching) {
+                            // 捏合控制滚动
+                            const handY = landmarks[9].y; // 使用手掌中心(中指根部)的Y坐标
+                            let scrollSpeed = 0;
+                            let actionText = "HOLDING";
+
+                            if (handY < 0.3) {
+                                // 上部区域：向上滚动 (回溯)
+                                scrollSpeed = -15; 
+                                actionText = "REWINDING <<";
+                            } else if (handY > 0.7) {
+                                // 下部区域：向下滚动 (前进)
+                                scrollSpeed = 15;
+                                actionText = "ADVANCING >>";
+                            }
+
+                            if (scrollSpeed !== 0) {
+                                window.scrollBy(0, scrollSpeed);
+                            }
+                            statusDiv.innerText = `GESTURE: PINCH - ${actionText}`;
+                            statusDiv.style.color = "#ffff00";
+
+                        } else if (isVictory && canLaunchFireworks) {
+                            // 胜利手势发射烟花
+                            statusDiv.innerText = "GESTURE: VICTORY - FIREWORK!";
+                            statusDiv.style.color = "#ff00ff";
+
+                            const now = performance.now();
+                            if (now - lastFireworkTime > 300) { // 冷却时间
+                                lastFireworkTime = now;
+                                
+                                // 映射手部坐标到屏幕坐标 (MediaPipe x是反的)
+                                const x = (1 - indexTip.x) * 2 - 1; // -1 to 1
+                                const y = -(indexTip.y) * 2 + 1;    // -1 to 1
+                                
+                                // 转换到 3D 空间的大致位置
+                                const target = new THREE.Vector3(x * 100, y * 60, END_YEAR_Z);
+                                fireworks.push(new Firework(target));
+                            }
+                        } else {
+                            statusDiv.innerText = "HAND DETECTED";
+                            statusDiv.style.color = "#00ff00";
+                        }
+                    } else {
+                        document.getElementById('model-status').innerText = "NO HAND";
+                        document.getElementById('model-status').style.color = "#888";
+                    }
                 }
                 requestAnimationFrame(() => predictWebcam(video));
             }
