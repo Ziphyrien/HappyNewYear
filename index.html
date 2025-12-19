@@ -1,0 +1,697 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>2025-2026 渐进式时光穿越</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #000510; /* 深蓝黑色背景 */
+            overflow-x: hidden;
+            font-family: 'Arial', sans-serif;
+        }
+        
+        #canvas-container {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 1;
+            outline: none;
+        }
+
+        #scroll-dummy {
+            height: 600vh; /* 稍微加长一点 */
+            width: 100%;
+            z-index: 0;
+            pointer-events: none;
+        }
+
+        #ui-layer {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 10;
+            pointer-events: none;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            transition: opacity 0.5s;
+        }
+
+        .scroll-hint {
+            position: absolute;
+            bottom: 50px;
+            color: rgba(255, 255, 255, 0.8);
+            animation: bounce 2s infinite;
+            font-size: 16px;
+            letter-spacing: 4px;
+            text-transform: uppercase;
+            text-shadow: 0 0 10px rgba(255,255,255,0.5);
+            font-weight: bold;
+        }
+
+        @keyframes bounce {
+            0%, 20%, 50%, 80%, 100% {transform: translateY(0);}
+            40% {transform: translateY(-10px);}
+            60% {transform: translateY(-5px);}
+        }
+
+        #loader {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: #000510;
+            z-index: 100;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            color: white;
+            font-size: 20px;
+            letter-spacing: 5px;
+            transition: opacity 1s ease-out;
+        }
+    </style>
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "@mediapipe/tasks-vision": "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.8/+esm"
+            }
+        }
+    </script>
+</head>
+<body>
+
+    <div id="loader">LOADING EXPERIENCE...</div>
+
+    <div id="gesture-info" style="position: fixed; top: 10px; right: 10px; color: #00ff00; z-index: 200; font-family: monospace; font-size: 12px; text-align: right; pointer-events: none;">
+        <div id="model-status">Preparing Gesture Model...</div>
+        <div id="camera-status" style="display:none">Camera Active</div>
+    </div>
+
+    <div id="ui-layer">
+        <div class="scroll-hint" id="hint-text">SCROLL TO TRAVEL</div>
+    </div>
+
+    <div id="scroll-dummy"></div>
+    
+    <div id="canvas-container"></div>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { FilesetResolver, HandLandmarker } from '@mediapipe/tasks-vision';
+
+        // --- 手势识别系统 ---
+        const modelStatus = document.getElementById('model-status');
+        const cameraStatus = document.getElementById('camera-status');
+        let handLandmarker = undefined;
+        let webcamRunning = false;
+
+        // 带进度和缓存的 Fetch
+        async function fetchWithProgress(url, onProgress) {
+            const cacheName = 'gesture-model-cache-v1';
+            try {
+                const cache = await caches.open(cacheName);
+                const cachedResponse = await cache.match(url);
+
+                if (cachedResponse) {
+                    onProgress(100);
+                    return cachedResponse.blob();
+                }
+            } catch (e) {
+                console.warn("Cache API not supported or failed", e);
+            }
+
+            const response = await fetch(url);
+            if (!response.ok) throw new Error(`Failed to fetch ${url}`);
+            
+            const contentLength = response.headers.get('content-length');
+            const total = contentLength ? parseInt(contentLength, 10) : 0;
+            let loaded = 0;
+
+            const res = new Response(new ReadableStream({
+                async start(controller) {
+                    const reader = response.body.getReader();
+                    while (true) {
+                        const { done, value } = await reader.read();
+                        if (done) break;
+                        loaded += value.byteLength;
+                        if (total) {
+                            onProgress((loaded / total) * 100);
+                        }
+                        controller.enqueue(value);
+                    }
+                    controller.close();
+                }
+            }));
+
+            const blob = await res.blob();
+            try {
+                const cache = await caches.open(cacheName);
+                await cache.put(url, new Response(blob));
+            } catch (e) {
+                console.warn("Failed to cache model", e);
+            }
+            return blob;
+        }
+
+        async function setupGestureRecognition() {
+            try {
+                const vision = await FilesetResolver.forVisionTasks(
+                    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.8/wasm"
+                );
+
+                const modelUrl = "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task";
+                
+                modelStatus.innerText = "Downloading Model: 0%";
+                
+                const modelBlob = await fetchWithProgress(modelUrl, (percent) => {
+                    modelStatus.innerText = `Downloading Model: ${Math.round(percent)}%`;
+                });
+
+                const modelUrlObj = URL.createObjectURL(modelBlob);
+
+                handLandmarker = await HandLandmarker.createFromOptions(vision, {
+                    baseOptions: {
+                        modelAssetPath: modelUrlObj,
+                        delegate: "GPU"
+                    },
+                    runningMode: "VIDEO",
+                    numHands: 1
+                });
+
+                modelStatus.innerText = "Model Loaded";
+                startCamera();
+
+            } catch (error) {
+                console.error(error);
+                modelStatus.innerText = "Model Load Failed";
+            }
+        }
+
+        async function startCamera() {
+            const video = document.createElement('video');
+            video.setAttribute('autoplay', '');
+            video.setAttribute('playsinline', '');
+            video.style.display = 'none'; 
+            document.body.appendChild(video);
+
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" } });
+                video.srcObject = stream;
+                video.addEventListener('loadeddata', () => {
+                    webcamRunning = true;
+                    cameraStatus.style.display = 'block';
+                    cameraStatus.innerText = "相机加载成功"; // Camera Loaded Successfully
+                    modelStatus.style.display = 'none';
+                    predictWebcam(video);
+                });
+            } catch (err) {
+                console.error(err);
+                cameraStatus.style.display = 'block';
+                cameraStatus.innerText = "相机访问失败"; // Camera Access Denied
+            }
+        }
+
+        let lastVideoTime = -1;
+        async function predictWebcam(video) {
+            if (handLandmarker && webcamRunning) {
+                let startTimeMs = performance.now();
+                if (video.currentTime !== lastVideoTime) {
+                    lastVideoTime = video.currentTime;
+                    const results = handLandmarker.detectForVideo(video, startTimeMs);
+                    // 可以在这里添加手势控制逻辑
+                }
+                requestAnimationFrame(() => predictWebcam(video));
+            }
+        }
+
+        setupGestureRecognition();
+
+        // --- 1. 基础场景设置 ---
+        const container = document.getElementById('canvas-container');
+        const scene = new THREE.Scene();
+        // 深空蓝雾气
+        scene.fog = new THREE.FogExp2(0x000510, 0.002);
+
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 2000);
+        camera.position.z = 50;
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        // 开启色调映射，让发光更自然
+        renderer.toneMapping = THREE.ACESFilmicToneMapping;
+        container.appendChild(renderer.domElement);
+
+        // --- 2. 资源生成 ---
+        
+        // 更好的文字纹理生成
+        function createTextTexture(text, color1, color2) {
+            const canvas = document.createElement('canvas');
+            const fontSize = 120;
+            canvas.width = 1024; // 更高分辨率
+            canvas.height = 512;
+            const ctx = canvas.getContext('2d');
+            
+            // 字体设置
+            ctx.font = `900 ${fontSize}px 'Arial', sans-serif`; // 更粗的字体
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            
+            // 发光背景 (模拟辉光)
+            ctx.shadowColor = color1;
+            ctx.shadowBlur = 40;
+            ctx.fillStyle = 'rgba(0,0,0,0)'; // 文字本身先透明，只画阴影
+            ctx.fillText(text, 512, 256);
+            
+            // 再次绘制文字，这次用渐变
+            ctx.shadowBlur = 0;
+            const gradient = ctx.createLinearGradient(0, 150, 0, 350);
+            gradient.addColorStop(0, color1);
+            gradient.addColorStop(1, color2);
+            ctx.fillStyle = gradient;
+            ctx.fillText(text, 512, 256);
+            
+            // 描边
+            ctx.strokeStyle = 'rgba(255,255,255,0.8)';
+            ctx.lineWidth = 2;
+            ctx.strokeText(text, 512, 256);
+
+            const tex = new THREE.CanvasTexture(canvas);
+            tex.needsUpdate = true;
+            return tex;
+        }
+
+        // 粒子纹理
+        function createParticleTexture() {
+            const canvas = document.createElement('canvas');
+            canvas.width = 32;
+            canvas.height = 32;
+            const ctx = canvas.getContext('2d');
+            const grad = ctx.createRadialGradient(16, 16, 0, 16, 16, 16);
+            grad.addColorStop(0, 'rgba(255,255,255,1)');
+            grad.addColorStop(0.4, 'rgba(255,255,255,0.5)');
+            grad.addColorStop(1, 'rgba(0,0,0,0)');
+            ctx.fillStyle = grad;
+            ctx.fillRect(0, 0, 32, 32);
+            return new THREE.CanvasTexture(canvas);
+        }
+        const particleTex = createParticleTexture();
+
+        // --- 3. 场景对象构建 ---
+
+        // A. 经典星空 (PointsMaterial) - 数量多但样式简单
+        const starsCount = 15000; 
+        const starsGeo = new THREE.BufferGeometry();
+        const posArray = new Float32Array(starsCount * 3);
+        // 移除复杂的颜色和大小数组，回归纯净
+
+        for(let i = 0; i < starsCount; i++) {
+            // 隧道分布
+            const r = 20 + Math.random() * 200; // 半径范围
+            const theta = Math.random() * Math.PI * 2;
+            
+            posArray[i*3] = r * Math.cos(theta);
+            posArray[i*3+1] = r * Math.sin(theta);
+            // Z轴覆盖范围
+            posArray[i*3+2] = (Math.random() - 0.5) * 1000 - 200; 
+        }
+
+        starsGeo.setAttribute('position', new THREE.BufferAttribute(posArray, 3));
+
+        const starsMaterial = new THREE.PointsMaterial({
+            size: 0.7, // 稍微调小一点，因为数量多了
+            color: 0x88ccff, // 经典的淡蓝色
+            map: particleTex,
+            transparent: true,
+            opacity: 0.8,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false
+        });
+
+        const starField = new THREE.Points(starsGeo, starsMaterial);
+        scene.add(starField);
+
+        // B. 年份路标 (Sprite)
+        function createYearSprite(text, zPos, c1, c2) {
+            const map = createTextTexture(text, c1, c2);
+            const material = new THREE.SpriteMaterial({ 
+                map: map, 
+                transparent: true,
+                opacity: 0,
+                blending: THREE.AdditiveBlending 
+            });
+            const sprite = new THREE.Sprite(material);
+            sprite.scale.set(40, 20, 1); // 放大一点
+            sprite.position.set(0, 0, zPos);
+            scene.add(sprite);
+            return sprite;
+        }
+
+        const START_CAMERA_Z = 50;
+        const END_YEAR_Z = -300; // 拉长距离
+        const END_CAMERA_Z = END_YEAR_Z + 50;
+
+        // 2025: 银白 -> 浅蓝
+        const yearStart = createYearSprite("2025", 0, "#ffffff", "#88ccff");
+        // 2026: 金黄 -> 橙红
+        const yearEnd = createYearSprite("2026", END_YEAR_Z, "#ffdd44", "#ff4422");
+
+        // --- 4. 烟花系统 (重写版) ---
+        let fireworks = [];
+        const raycaster = new THREE.Raycaster();
+        const mouse = new THREE.Vector2();
+
+        // 调色板与辅助函数：主色 + 色相抖动，保证统一又有层次
+        const FIREWORK_PALETTE = [30/360, 320/360, 200/360, 140/360, 260/360, 0];
+        function hslToRgb(h, s, l) {
+            const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+            const p = 2 * l - q;
+            const hue2rgb = (t) => {
+                if (t < 0) t += 1;
+                if (t > 1) t -= 1;
+                if (t < 1/6) return p + (q - p) * 6 * t;
+                if (t < 1/2) return q;
+                if (t < 2/3) return p + (q - p) * (2/3 - t) * 6;
+                return p;
+            };
+            return {
+                r: hue2rgb(h + 1/3),
+                g: hue2rgb(h),
+                b: hue2rgb(h - 1/3)
+            };
+        }
+        function smoothstep(edge0, edge1, x) {
+            const t = Math.min(1, Math.max(0, (x - edge0) / (edge1 - edge0)));
+            return t * t * (3 - 2 * t);
+        }
+
+        // 烟花着色器
+        const fwVertexShader = `
+            attribute float size;
+            attribute vec3 color;
+            attribute float alpha0;
+            varying vec3 vColor;
+            varying float vAlpha0;
+            void main() {
+                vColor = color;
+                vAlpha0 = alpha0;
+                vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+                gl_PointSize = size * (300.0 / -mvPosition.z);
+                gl_Position = projectionMatrix * mvPosition;
+            }
+        `;
+
+        const fwFragmentShader = `
+            uniform sampler2D pointTexture;
+            uniform float uOpacity;
+            varying vec3 vColor;
+            varying float vAlpha0;
+            void main() {
+                vec4 texColor = texture2D(pointTexture, gl_PointCoord);
+                if (texColor.a < 0.1) discard;
+                gl_FragColor = vec4(vColor, texColor.a * uOpacity * vAlpha0);
+            }
+        `;
+
+        class Firework {
+            constructor(targetPosition) {
+                this.done = false;
+                this.target = targetPosition;
+                // 从下方发射
+                this.pos = new THREE.Vector3(targetPosition.x, targetPosition.y - 80, targetPosition.z);
+                
+                // 挑选主色，后续做色相抖动
+                this.baseHue = FIREWORK_PALETTE[Math.floor(Math.random() * FIREWORK_PALETTE.length)];
+
+                // 发射阶段粒子
+                this.launchGeo = new THREE.BufferGeometry();
+                this.launchGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array([0,0,0]), 3));
+                this.launchMat = new THREE.PointsMaterial({
+                    size: 3,
+                    color: 0xffffff,
+                    map: particleTex,
+                    blending: THREE.AdditiveBlending,
+                    depthWrite: false,
+                    transparent: true
+                });
+                this.launchMesh = new THREE.Points(this.launchGeo, this.launchMat);
+                this.launchMesh.position.copy(this.pos);
+                scene.add(this.launchMesh);
+
+                this.state = 0; // 0: launch, 1: explode
+                this.speed = new THREE.Vector3().subVectors(this.target, this.pos).normalize().multiplyScalar(3.5);
+            }
+
+            update() {
+                if (this.state === 0) {
+                    // 发射
+                    this.pos.add(this.speed);
+                    this.launchMesh.position.copy(this.pos);
+                    
+                    // 距离检测
+                    if (this.pos.distanceTo(this.target) < 4) {
+                        this.explode();
+                    }
+                } else {
+                    // 爆炸
+                    const positions = this.expGeo.attributes.position.array;
+                    const sizes = this.expGeo.attributes.size.array;
+                    
+                    for(let i=0; i<this.particleCount; i++) {
+                        positions[i*3] += this.velocities[i].x;
+                        positions[i*3+1] += this.velocities[i].y;
+                        positions[i*3+2] += this.velocities[i].z;
+
+                        // 重力
+                        this.velocities[i].y -= 0.02;
+                        // 阻力
+                        this.velocities[i].x *= 0.95;
+                        this.velocities[i].y *= 0.95;
+                        this.velocities[i].z *= 0.95;
+                        
+                        // 变小
+                        sizes[i] *= 0.96;
+                    }
+                    this.expGeo.attributes.position.needsUpdate = true;
+                    this.expGeo.attributes.size.needsUpdate = true;
+
+                    // 淡出（乘法衰减更平滑）
+                    this.expMat.uniforms.uOpacity.value *= 0.97;
+                    if(this.expMat.uniforms.uOpacity.value <= 0.02) {
+                        this.done = true;
+                        this.dispose();
+                    }
+                }
+            }
+
+            explode() {
+                this.state = 1;
+                scene.remove(this.launchMesh);
+                this.launchGeo.dispose();
+                this.launchMat.dispose();
+
+                this.particleCount = 500;
+                this.expGeo = new THREE.BufferGeometry();
+                const posArr = new Float32Array(this.particleCount * 3);
+                const sizeArr = new Float32Array(this.particleCount);
+                const colorArr = new Float32Array(this.particleCount * 3);
+                const alphaArr = new Float32Array(this.particleCount);
+                this.velocities = [];
+
+                for(let i=0; i<this.particleCount; i++) {
+                    posArr[i*3] = this.pos.x;
+                    posArr[i*3+1] = this.pos.y;
+                    posArr[i*3+2] = this.pos.z;
+
+                    sizeArr[i] = Math.random() * 4 + 2;
+
+                    // 色相抖动 + 轻微亮度随机
+                    const jitterHue = (this.baseHue + (Math.random() * 12 - 6) / 360 + 1.0) % 1.0;
+                    const sat = 0.85 + Math.random() * 0.1;
+                    const light = 0.65 + Math.random() * 0.15;
+                    const rgb = hslToRgb(jitterHue, sat, light);
+                    colorArr[i*3] = rgb.r;
+                    colorArr[i*3+1] = rgb.g;
+                    colorArr[i*3+2] = rgb.b;
+
+                    // 半径分层：内核更亮，外圈更淡
+                    const rUnit = Math.random();
+                    alphaArr[i] = 1.0 - smoothstep(0.0, 1.0, rUnit);
+
+                    // 爆炸速度
+                    const theta = Math.random() * Math.PI * 2;
+                    const phi = Math.acos((Math.random() * 2) - 1);
+                    const speed = Math.random() * 2.5 + 0.5;
+                    
+                    this.velocities.push({
+                        x: speed * Math.sin(phi) * Math.cos(theta),
+                        y: speed * Math.sin(phi) * Math.sin(theta),
+                        z: speed * Math.cos(phi)
+                    });
+                }
+
+                this.expGeo.setAttribute('position', new THREE.BufferAttribute(posArr, 3));
+                this.expGeo.setAttribute('size', new THREE.BufferAttribute(sizeArr, 1));
+                this.expGeo.setAttribute('color', new THREE.BufferAttribute(colorArr, 3));
+                this.expGeo.setAttribute('alpha0', new THREE.BufferAttribute(alphaArr, 1));
+
+                this.expMat = new THREE.ShaderMaterial({
+                    uniforms: {
+                        pointTexture: { value: particleTex },
+                        uOpacity: { value: 1.0 }
+                    },
+                    vertexShader: fwVertexShader,
+                    fragmentShader: fwFragmentShader,
+                    blending: THREE.AdditiveBlending,
+                    depthWrite: false,
+                    transparent: true
+                });
+
+                this.expMesh = new THREE.Points(this.expGeo, this.expMat);
+                scene.add(this.expMesh);
+            }
+
+            dispose() {
+                if(this.launchMesh) {
+                    scene.remove(this.launchMesh);
+                    this.launchGeo.dispose();
+                    this.launchMat.dispose();
+                }
+                if(this.expMesh) {
+                    scene.remove(this.expMesh);
+                    this.expGeo.dispose();
+                    this.expMat.dispose();
+                }
+            }
+        }
+
+        // --- 5. 交互逻辑 ---
+
+        let scrollProgress = 0;
+        let canLaunchFireworks = false;
+
+        function clamp01(v) { return Math.max(0, Math.min(1, v)); }
+
+        window.addEventListener('scroll', () => {
+            const scrollMax = document.documentElement.scrollHeight - window.innerHeight;
+            if (scrollMax <= 0) scrollProgress = 0;
+            else scrollProgress = clamp01(window.scrollY / scrollMax);
+            
+            const hint = document.getElementById('hint-text');
+            
+            // 只在开始时显示提示
+            if (scrollProgress > 0.1) {
+                hint.style.opacity = 0;
+            } else {
+                hint.style.opacity = 1;
+                hint.innerText = "SCROLL TO TRAVEL";
+                hint.style.color = "rgba(255,255,255,0.8)";
+                hint.style.textShadow = "0 0 10px rgba(255,255,255,0.5)";
+            }
+
+            // 到底部激活烟花，但不显示文字
+            if (scrollProgress > 0.95) {
+                canLaunchFireworks = true;
+            } else {
+                canLaunchFireworks = false;
+            }
+        });
+
+        let mouseX = 0;
+        let mouseY = 0;
+        window.addEventListener('mousemove', (e) => {
+            mouseX = (e.clientX / window.innerWidth) * 2 - 1;
+            mouseY = -(e.clientY / window.innerHeight) * 2 + 1;
+            mouse.x = mouseX;
+            mouse.y = mouseY;
+        });
+
+        window.addEventListener('mousedown', () => {
+            if (!canLaunchFireworks) return;
+            raycaster.setFromCamera(mouse, camera);
+            const distance = (END_YEAR_Z - camera.position.z) / raycaster.ray.direction.z;
+            const target = raycaster.ray.at(distance, new THREE.Vector3());
+            target.x += (Math.random()-0.5) * 20;
+            target.y += (Math.random()-0.5) * 20;
+            fireworks.push(new Firework(target));
+        });
+
+        // --- 6. 动画循环 ---
+        const clock = new THREE.Clock();
+
+        function animate() {
+            requestAnimationFrame(animate);
+            const time = clock.getElapsedTime();
+
+            // 相机移动
+            const targetCameraZ = START_CAMERA_Z + (END_CAMERA_Z - START_CAMERA_Z) * scrollProgress;
+            camera.position.z += (targetCameraZ - camera.position.z) * 0.05;
+            
+            // 视差
+            camera.position.x += (mouseX * 5 - camera.position.x) * 0.05;
+            camera.position.y += (mouseY * 5 - camera.position.y) * 0.05;
+            // 增加相机旋转，更有动感
+            camera.rotation.z = mouseX * 0.1 + scrollProgress * 0.3;
+
+            // 文字浮动 & 淡入淡出
+            // 2025
+            let distToStart = Math.abs(camera.position.z - yearStart.position.z);
+            yearStart.material.opacity = Math.max(0, 1 - (distToStart - 10) / 80);
+            yearStart.position.y = Math.sin(time) * 2; // 浮动
+
+            // 2026
+            let distToEnd = Math.abs(camera.position.z - yearEnd.position.z);
+            // 优化淡入逻辑：距离越近越清晰
+            let endOpacity = clamp01(1 - (distToEnd - 30) / 150);
+            yearEnd.material.opacity = endOpacity;
+            yearEnd.position.y = Math.sin(time * 1.5) * 2; // 浮动
+
+            // 星空旋转 - 加速
+            starField.rotation.z = time * 0.06 + scrollProgress * 2.0;
+
+            // 自动烟花
+            if (canLaunchFireworks && Math.random() < 0.03) {
+                const autoTarget = new THREE.Vector3(
+                    (Math.random()-0.5) * 120,
+                    (Math.random()-0.5) * 80,
+                    END_YEAR_Z - 20 // 在文字后面一点炸
+                );
+                fireworks.push(new Firework(autoTarget));
+            }
+
+            for (let i = fireworks.length - 1; i >= 0; i--) {
+                fireworks[i].update();
+                if (fireworks[i].done) {
+                    fireworks.splice(i, 1);
+                }
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        setTimeout(() => {
+            document.getElementById('loader').style.opacity = 0;
+            setTimeout(() => document.getElementById('loader').remove(), 1000);
+            animate();
+        }, 1000);
+
+    </script>
+</body>
+</html>
