@@ -83,8 +83,8 @@
     <script type="importmap">
         {
             "imports": {
-                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
-                "@mediapipe/tasks-vision": "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.8/+esm"
+                "three": "https://unpkg.com/three/build/three.module.js",
+                "@mediapipe/tasks-vision": "https://cdn.jsdmirror.com/npm/@mediapipe/tasks-vision/+esm"
             }
         }
     </script>
@@ -167,7 +167,7 @@
         async function setupGestureRecognition() {
             try {
                 const vision = await FilesetResolver.forVisionTasks(
-                    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.8/wasm"
+                    "https://cdn.jsdmirror.com/npm/@mediapipe/tasks-vision/wasm"
                 );
 
                 const modelUrl = "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task";
