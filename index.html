@@ -9,7 +9,7 @@
             margin: 0;
             padding: 0;
             background-color: #000510; /* 深蓝黑色背景 */
-            overflow-x: hidden;
+            overflow: hidden; /* 禁用滚动 */
             font-family: 'Arial', sans-serif;
         }
         
@@ -99,11 +99,9 @@
     </div>
 
     <div id="ui-layer">
-        <div class="scroll-hint" id="hint-text">SCROLL TO TRAVEL</div>
+        <div class="scroll-hint" id="hint-text">CLICK OR SHOW "OK" TO TRAVEL</div>
     </div>
 
-    <div id="scroll-dummy"></div>
-    
     <div id="canvas-container"></div>
 
     <script type="module">
@@ -244,7 +242,7 @@
                     if (results.landmarks && results.landmarks.length > 0) {
                         const landmarks = results.landmarks[0]; // 获取第一只手
                         
-                        // 1. 识别捏合 (Pinch) - 用于滚动
+                        // 1. 识别捏合 (Pinch) - 用于触发自动滚动 (OK手势)
                         const thumbTip = landmarks[4];
                         const indexTip = landmarks[8];
                         const pinchDist = getDistance(thumbTip, indexTip);
@@ -264,27 +262,15 @@
                         statusDiv.style.display = 'block';
 
                         if (isPinching) {
-                            // 捏合控制滚动
-                            const handY = landmarks[9].y; // 使用手掌中心(中指根部)的Y坐标
-                            let scrollSpeed = 0;
-                            let actionText = "HOLDING";
-
-                            if (handY < 0.3) {
-                                // 上部区域：向上滚动 (回溯)
-                                scrollSpeed = -15; 
-                                actionText = "REWINDING <<";
-                            } else if (handY > 0.7) {
-                                // 下部区域：向下滚动 (前进)
-                                scrollSpeed = 15;
-                                actionText = "ADVANCING >>";
+                            // OK手势触发自动滚动
+                            if (!isJourneyActive) {
+                                startJourney();
+                                statusDiv.innerText = "GESTURE: OK - STARTING JOURNEY";
+                                statusDiv.style.color = "#ffff00";
+                            } else {
+                                statusDiv.innerText = "GESTURE: OK - ENJOY THE RIDE";
+                                statusDiv.style.color = "#ffff00";
                             }
-
-                            if (scrollSpeed !== 0) {
-                                window.scrollBy(0, scrollSpeed);
-                            }
-                            statusDiv.innerText = `GESTURE: PINCH - ${actionText}`;
-                            statusDiv.style.color = "#ffff00";
-
                         } else if (isVictory && canLaunchFireworks) {
                             // 胜利手势发射烟花
                             statusDiv.innerText = "GESTURE: VICTORY - FIREWORK!";
@@ -388,6 +374,23 @@
         }
         const particleTex = createParticleTexture();
 
+        // 文字专用高锐度纹理
+        function createTextParticleTexture() {
+            const canvas = document.createElement('canvas');
+            canvas.width = 64;
+            canvas.height = 64;
+            const ctx = canvas.getContext('2d');
+            const grad = ctx.createRadialGradient(32, 32, 0, 32, 32, 32);
+            grad.addColorStop(0, 'rgba(255,255,255,1)');
+            grad.addColorStop(0.2, 'rgba(255,255,255,0.8)'); // 实心核心
+            grad.addColorStop(0.5, 'rgba(255,255,255,0.1)'); // 快速衰减
+            grad.addColorStop(1, 'rgba(0,0,0,0)');
+            ctx.fillStyle = grad;
+            ctx.fillRect(0, 0, 64, 64);
+            return new THREE.CanvasTexture(canvas);
+        }
+        const textParticleTex = createTextParticleTexture();
+
         // --- 3. 场景对象构建 ---
 
         // A. 经典星空 (PointsMaterial) - 数量多但样式简单
@@ -422,30 +425,226 @@
         const starField = new THREE.Points(starsGeo, starsMaterial);
         scene.add(starField);
 
-        // B. 年份路标 (Sprite)
-        function createYearSprite(text, zPos, c1, c2) {
-            const map = createTextTexture(text, c1, c2);
-            const material = new THREE.SpriteMaterial({ 
-                map: map, 
-                transparent: true,
-                opacity: 0,
-                blending: THREE.AdditiveBlending 
-            });
-            const sprite = new THREE.Sprite(material);
-            sprite.scale.set(40, 20, 1); // 放大一点
-            sprite.position.set(0, 0, zPos);
-            scene.add(sprite);
-            return sprite;
+        // --- 粒子文字系统 ---
+        class TextParticleSystem {
+            constructor(text, zPos, options = {}) {
+                this.zPos = zPos;
+                this.text = text;
+                this.options = Object.assign({
+                    colorType: 'warm', // 'warm' or 'cool'
+                    behavior: 'end'    // 'start' or 'end'
+                }, options);
+
+                this.particles = [];
+                this.geometry = new THREE.BufferGeometry();
+                this.material = new THREE.PointsMaterial({
+                    size: 0.25, // 进一步减小尺寸，配合高锐度纹理
+                    vertexColors: true,
+                    map: textParticleTex, // 使用专用纹理
+                    transparent: true,
+                    opacity: this.options.behavior === 'start' ? 1 : 0,
+                    blending: THREE.AdditiveBlending,
+                    depthWrite: false
+                });
+                
+                this.initParticles();
+                this.mesh = new THREE.Points(this.geometry, this.material);
+                scene.add(this.mesh);
+                
+                this.formedTime = 0;
+            }
+
+            initParticles() {
+                const canvas = document.createElement('canvas');
+                const ctx = canvas.getContext('2d');
+                canvas.width = 1024;
+                canvas.height = 512;
+                
+                ctx.font = "900 200px 'Arial', sans-serif";
+                ctx.textAlign = "center";
+                ctx.textBaseline = "middle";
+                ctx.fillStyle = "white";
+                ctx.fillText(this.text, 512, 256);
+                
+                const imgData = ctx.getImageData(0, 0, 1024, 512);
+                const data = imgData.data;
+                
+                const points = [];
+                // 提高采样密度：step 从 2 改为 1 (最高密度)
+                const step = 1;
+                for(let y = 0; y < 512; y += step) {
+                    for(let x = 0; x < 1024; x += step) {
+                        if(data[(y * 1024 + x) * 4 + 3] > 128) {
+                            // 基础坐标
+                            const baseX = (x - 512) * 0.12;
+                            const baseY = -(y - 256) * 0.12;
+                            
+                            // 增加厚度：每个点生成多个粒子，分布在 Z 轴上
+                            // 再次加倍密度：平均每个像素生成 2.5 个粒子
+                            const count = Math.random() > 0.5 ? 3 : 2;
+                            
+                            for(let k=0; k<count; k++) {
+                                // 随机抖动，打破网格感
+                                const jitter = 0.35; // 稍微增加抖动范围以适应更高密度
+                                const jx = (Math.random() - 0.5) * jitter;
+                                const jy = (Math.random() - 0.5) * jitter;
+                                
+                                // Z轴厚度
+                                const thickness = 6;
+                                const jz = (Math.random() - 0.5) * thickness;
+
+                                points.push({
+                                    x: baseX + jx,
+                                    y: baseY + jy,
+                                    z: jz // 相对 Z 偏移
+                                });
+                            }
+                        }
+                    }
+                }
+
+                const positions = new Float32Array(points.length * 3);
+                const colors = new Float32Array(points.length * 3);
+                
+                for(let i = 0; i < points.length; i++) {
+                    const tx = points[i].x;
+                    const ty = points[i].y;
+                    const tz = this.zPos + points[i].z; // 加上 Z 偏移
+
+                    // 初始随机位置（散落在星空中）
+                    const sx = (Math.random() - 0.5) * 400;
+                    const sy = (Math.random() - 0.5) * 200;
+                    const sz = this.zPos + (Math.random() - 0.5) * 300;
+
+                    this.particles.push({
+                        target: new THREE.Vector3(tx, ty, tz),
+                        start: new THREE.Vector3(sx, sy, sz),
+                        current: this.options.behavior === 'start' ? new THREE.Vector3(tx, ty, tz) : new THREE.Vector3(sx, sy, sz),
+                        velocity: new THREE.Vector3(
+                            (Math.random()-0.5) * 0.2, 
+                            (Math.random()-0.5) * 0.2, 
+                            (Math.random()-0.5) * 0.2
+                        )
+                    });
+
+                    // 如果是 start 模式，初始位置就是目标位置
+                    if (this.options.behavior === 'start') {
+                        positions[i*3] = tx;
+                        positions[i*3+1] = ty;
+                        positions[i*3+2] = tz;
+                    } else {
+                        positions[i*3] = sx;
+                        positions[i*3+1] = sy;
+                        positions[i*3+2] = sz;
+                    }
+                    
+                    // 颜色设置
+                    const color = new THREE.Color();
+                    if (this.options.colorType === 'warm') {
+                        // 金色 -> 橙红
+                        const hue = 0.08 + Math.random() * 0.08; 
+                        // 根据 Z 深度微调亮度，增强立体感
+                        // points[i].z 范围约 -3 到 3
+                        const depthFactor = (points[i].z + 3) / 6; // 0 to 1
+                        const lightness = 0.5 + depthFactor * 0.2; // 后暗前亮
+                        
+                        color.setHSL(hue, 1.0, lightness);
+                    } else {
+                        // 银白 -> 浅蓝
+                        const hue = 0.55 + Math.random() * 0.1; 
+                        const sat = Math.random() * 0.5; 
+                        const depthFactor = (points[i].z + 3) / 6;
+                        const lightness = 0.8 + depthFactor * 0.2;
+                        
+                        color.setHSL(hue, sat, lightness);
+                    }
+                    
+                    colors[i*3] = color.r;
+                    colors[i*3+1] = color.g;
+                    colors[i*3+2] = color.b;
+                }
+
+                this.geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+                this.geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+            }
+
+            update(time, scrollProgress) {
+                const positions = this.geometry.attributes.position.array;
+                
+                if (this.options.behavior === 'end') {
+                    // --- 2026 逻辑 (聚拢 -> 分散) ---
+                    
+                    // 0.75 开始聚拢，1.0 完全成型
+                    let gatherStrength = Math.max(0, (scrollProgress - 0.75) * 4);
+                    gatherStrength = Math.min(1, gatherStrength);
+                    const ease = 1 - Math.pow(1 - gatherStrength, 3);
+
+                    for(let i = 0; i < this.particles.length; i++) {
+                        const p = this.particles[i];
+                        
+                        p.current.lerpVectors(p.start, p.target, ease);
+                        if (gatherStrength > 0.9) {
+                            p.current.x += Math.sin(time * 2 + p.target.y) * 0.02;
+                            p.current.y += Math.cos(time * 1.5 + p.target.x) * 0.02;
+                        }
+
+                        positions[i*3] = p.current.x;
+                        positions[i*3+1] = p.current.y;
+                        positions[i*3+2] = p.current.z;
+                    }
+                    
+                    this.material.opacity = Math.min(1, gatherStrength * 1.2);
+
+                } else {
+                    // --- 2025 逻辑 (完整 -> 飘散) ---
+                    
+                    // 随着滚动，逐渐飘散
+                    // scrollProgress 0 -> 0.3 期间逐渐散开
+                    const disperseStart = 0.05;
+                    const disperseStrength = Math.max(0, (scrollProgress - disperseStart) * 2); 
+                    
+                    for(let i = 0; i < this.particles.length; i++) {
+                        const p = this.particles[i];
+                        
+                        // 基础位置是 target
+                        // 加上基于 disperseStrength 的随机偏移
+                        if (disperseStrength > 0) {
+                            // 模拟飘散：向后(z)和四周扩散
+                            // 使用 p.velocity 作为随机方向源 (它在 initParticles 里被初始化为随机向量)
+                            // 放大 velocity 的影响
+                            
+                            const moveX = p.velocity.x * disperseStrength * 300;
+                            const moveY = p.velocity.y * disperseStrength * 300;
+                            const moveZ = disperseStrength * 100; // 整体向后飘
+
+                            positions[i*3] = p.target.x + moveX;
+                            positions[i*3+1] = p.target.y + moveY;
+                            positions[i*3+2] = p.target.z + moveZ;
+                        } else {
+                            // 完整状态的呼吸
+                            positions[i*3] = p.target.x + Math.sin(time * 2 + p.target.y) * 0.02;
+                            positions[i*3+1] = p.target.y + Math.cos(time * 1.5 + p.target.x) * 0.02;
+                            positions[i*3+2] = p.target.z;
+                        }
+                    }
+
+                    // 透明度随距离降低
+                    this.material.opacity = Math.max(0, 1 - disperseStrength * 0.5);
+                }
+                
+                this.geometry.attributes.position.needsUpdate = true;
+            }
         }
 
         const START_CAMERA_Z = 50;
         const END_YEAR_Z = -300; // 拉长距离
         const END_CAMERA_Z = END_YEAR_Z + 50;
 
-        // 2025: 银白 -> 浅蓝
-        const yearStart = createYearSprite("2025", 0, "#ffffff", "#88ccff");
-        // 2026: 金黄 -> 橙红
-        const yearEnd = createYearSprite("2026", END_YEAR_Z, "#ffdd44", "#ff4422");
+        // 2025: 银白 -> 浅蓝 (粒子)
+        const yearStartParticles = new TextParticleSystem("2025", 0, { colorType: 'cool', behavior: 'start' });
+        
+        // 2026: 金黄 -> 橙红 (粒子)
+        const yearEndParticles = new TextParticleSystem("2026", END_YEAR_Z, { colorType: 'warm', behavior: 'end' });
 
         // --- 4. 烟花系统 (重写版) ---
         let fireworks = [];
@@ -660,32 +859,22 @@
 
         let scrollProgress = 0;
         let canLaunchFireworks = false;
+        let isJourneyActive = false;
 
         function clamp01(v) { return Math.max(0, Math.min(1, v)); }
 
-        window.addEventListener('scroll', () => {
-            const scrollMax = document.documentElement.scrollHeight - window.innerHeight;
-            if (scrollMax <= 0) scrollProgress = 0;
-            else scrollProgress = clamp01(window.scrollY / scrollMax);
+        function startJourney() {
+            if (isJourneyActive) return;
+            isJourneyActive = true;
             
             const hint = document.getElementById('hint-text');
+            hint.style.opacity = 0;
             
-            // 只在开始时显示提示
-            if (scrollProgress > 0.1) {
-                hint.style.opacity = 0;
-            } else {
-                hint.style.opacity = 1;
-                hint.innerText = "SCROLL TO TRAVEL";
-                hint.style.color = "rgba(255,255,255,0.8)";
-                hint.style.textShadow = "0 0 10px rgba(255,255,255,0.5)";
-            }
+            // 播放背景音乐或音效（可选）
+        }
 
-            // 到底部激活烟花，但不显示文字
-            if (scrollProgress > 0.95) {
-                canLaunchFireworks = true;
-            } else {
-                canLaunchFireworks = false;
-            }
+        window.addEventListener('click', () => {
+            startJourney();
         });
 
         let mouseX = 0;
@@ -714,6 +903,20 @@
             requestAnimationFrame(animate);
             const time = clock.getElapsedTime();
 
+            // 自动平滑滚动逻辑
+            if (isJourneyActive && scrollProgress < 1.0) {
+                // 15秒走完全程，速度随时间变化可以更平滑
+                scrollProgress += 0.0008; 
+                if (scrollProgress > 1.0) scrollProgress = 1.0;
+            }
+
+            // 到底部激活烟花
+            if (scrollProgress > 0.95) {
+                canLaunchFireworks = true;
+            } else {
+                canLaunchFireworks = false;
+            }
+
             // 相机移动
             const targetCameraZ = START_CAMERA_Z + (END_CAMERA_Z - START_CAMERA_Z) * scrollProgress;
             camera.position.z += (targetCameraZ - camera.position.z) * 0.05;
@@ -724,18 +927,9 @@
             // 增加相机旋转，更有动感
             camera.rotation.z = mouseX * 0.1 + scrollProgress * 0.3;
 
-            // 文字浮动 & 淡入淡出
-            // 2025
-            let distToStart = Math.abs(camera.position.z - yearStart.position.z);
-            yearStart.material.opacity = Math.max(0, 1 - (distToStart - 10) / 80);
-            yearStart.position.y = Math.sin(time) * 2; // 浮动
-
-            // 2026
-            let distToEnd = Math.abs(camera.position.z - yearEnd.position.z);
-            // 优化淡入逻辑：距离越近越清晰
-            let endOpacity = clamp01(1 - (distToEnd - 30) / 150);
-            yearEnd.material.opacity = endOpacity;
-            yearEnd.position.y = Math.sin(time * 1.5) * 2; // 浮动
+            // 粒子更新
+            yearStartParticles.update(time, scrollProgress);
+            yearEndParticles.update(time, scrollProgress);
 
             // 星空旋转 - 加速
             starField.rotation.z = time * 0.06 + scrollProgress * 2.0;
